@@ -18,17 +18,12 @@ st.set_page_config(page_title="AI文档助手", page_icon="📚", layout="wide")
 st.title("📚 AI 文档问答助手（FAISS版）")
 st.caption("上传你的文档，直接用中文提问！")
 
-MAX_QUESTIONS = 5
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "doc_hash" not in st.session_state:
     st.session_state.doc_hash = None
-if "doc_text" not in st.session_state:
-    st.session_state.doc_text = ""
-if "question_count" not in st.session_state:
-    st.session_state.question_count = 0
 
+# ========== 读取文档 ==========
 def read_file(uploaded_file) -> str:
     name = uploaded_file.name.lower()
     if name.endswith('.pdf'):
@@ -41,15 +36,19 @@ def read_file(uploaded_file) -> str:
         return uploaded_file.read().decode('utf-8')
     return ""
 
+# ========== 缓存Embedding模型 ==========
 @st.cache_resource
 def get_embeddings():
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
 
+# ========== 用哈希值缓存向量库 ==========
 @st.cache_resource
 def build_vectorstore(doc_hash: str, text: str):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500, chunk_overlap=50
+    )
     chunks = splitter.split_text(text)
     return FAISS.from_texts(chunks, get_embeddings())
 
@@ -60,9 +59,13 @@ def get_vectorstore():
         return None
     return build_vectorstore(h, t)
 
+# ========== 侧边栏 ==========
 with st.sidebar:
     st.header("📁 上传文档")
-    uploaded_file = st.file_uploader("支持 PDF / Word / TXT", type=["pdf", "docx", "txt"])
+    uploaded_file = st.file_uploader(
+        "支持 PDF / Word / TXT",
+        type=["pdf", "docx", "txt"]
+    )
     if uploaded_file:
         with st.spinner("正在读取并建立索引..."):
             text = read_file(uploaded_file)
@@ -70,34 +73,31 @@ with st.sidebar:
                 doc_hash = hashlib.md5(text.encode()).hexdigest()
                 st.session_state.doc_hash = doc_hash
                 st.session_state.doc_text = text
-                build_vectorstore(doc_hash, text)
+                vs = build_vectorstore(doc_hash, text)
+                import store
+                store.set_vs(vs)
                 st.success(f"✅ 文档加载成功！共 {len(text)} 字符")
             else:
                 st.error("文档内容为空")
 
     st.divider()
-
-    remaining = MAX_QUESTIONS - st.session_state.question_count
-    if remaining > 0:
-        st.info(f"💬 剩余提问次数：{remaining} / {MAX_QUESTIONS}")
-    else:
-        st.error(f"⚠️ 提问次数已用完！")
-
     if st.button("🗑️ 清空对话"):
         st.session_state.messages = []
-        st.session_state.question_count = 0
         st.rerun()
 
+# ========== LLM ==========
 llm = ChatOpenAI(
     model="deepseek-chat",
     openai_api_key=os.getenv("OPENAI_API_KEY"),
     openai_api_base=os.getenv("OPENAI_BASE_URL")
 )
 
+# ========== 工具 ==========
 @tool
 def search_document(query: str) -> str:
     """在已加载的文档中搜索相关内容，输入问题关键词"""
-    vs = get_vectorstore()
+    import store
+    vs = store.get_vs()
     if vs is None:
         return "还没有加载文档，请先在左侧上传文件！"
     docs = vs.similarity_search(query, k=3)
@@ -112,18 +112,13 @@ SYSTEM_PROMPT = """你是一个专业的文档助手。
 
 agent = create_react_agent(llm, [search_document])
 
+# ========== 显示历史消息 ==========
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-remaining = MAX_QUESTIONS - st.session_state.question_count
-if remaining <= 0:
-    st.warning("⚠️ 提问次数已用完！点击左侧'清空对话'重置次数。")
-
-if prompt := st.chat_input(
-    "请输入你的问题...",
-    disabled=remaining <= 0
-):
+# ========== 输入框 ==========
+if prompt := st.chat_input("请输入你的问题..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.write(prompt)
@@ -141,5 +136,3 @@ if prompt := st.chat_input(
             "role": "assistant",
             "content": answer
         })
-        st.session_state.question_count += 1
-        st.rerun()
